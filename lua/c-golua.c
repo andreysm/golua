@@ -13,52 +13,60 @@
 static const char GoStateRegistryKey = 'k'; //golua registry key
 static const char PanicFIDRegistryKey = 'k';
 
+int callback_function(lua_State* L);
+int interface_index_callback(lua_State *L);
+int interface_newindex_callback(lua_State *L);
+int gchook_wrapper(lua_State* L);
+
 typedef struct _chunk {
 	int size; // chunk size
 	char *buffer; // chunk data
 	char* toread; // chunk to read
 } chunk;
 
-/* taken from lua5.2 source */
-void *testudata(lua_State *L, int ud, const char *tname)
+unsigned int *testudata(lua_State *L, int n, const char * field, void * expected)
 {
-	void *p = lua_touserdata(L, ud);
+	unsigned int *p = lua_touserdata(L, n);
 	if (p != NULL)
 	{  /* value is a userdata? */
-		if (lua_getmetatable(L, ud))
+		if (lua_getmetatable(L, n))
 		{  /* does it have a metatable? */
-			luaL_getmetatable(L, tname);  /* get correct metatable */
-			if (!lua_rawequal(L, -1, -2))  /* not the same? */
-				p = NULL;  /* value is a userdata with wrong metatable */
-			lua_pop(L, 2);  /* remove both metatables */
+			lua_getfield(L, -1, field);
+			if (lua_tocfunction(L, -1) != expected)
+				p = NULL;  /* wrong metatable */
+			lua_pop(L, 2);  /* remove metatable and field values */
 			return p;
 		}
 	}
 	return NULL;  /* value is not a userdata with a metatable */
 }
 
+unsigned int *testgofunction(lua_State *L, int n)
+{
+	/* GoFunction should have __call callback */
+	return testudata(L, n, "__call", callback_function);
+}
+
+unsigned int *testgostruct(lua_State *L, int n)
+{
+	/* GoInterface should have interface_index_callback */
+	return testudata(L, n, "__index", interface_index_callback);
+}
+
+unsigned int *testgosomething(lua_State *L, int n)
+{
+	/* GoFunction and GoInterface should have gchook_wrapper callback */
+	return testudata(L, n, "__gc", gchook_wrapper);
+}
+
 int clua_isgofunction(lua_State *L, int n)
 {
-	return testudata(L, n, MT_GOFUNCTION) != NULL;
+	return testgofunction(L, n) != NULL;
 }
 
 int clua_isgostruct(lua_State *L, int n)
 {
-	return testudata(L, n, MT_GOINTERFACE) != NULL;
-}
-
-unsigned int* clua_checkgosomething(lua_State* L, int index, const char *desired_metatable)
-{
-	if (desired_metatable != NULL)
-	{
-		return testudata(L, index, desired_metatable);
-	}
-	else
-	{
-		unsigned int *sid = testudata(L, index, MT_GOFUNCTION);
-		if (sid != NULL) return sid;
-		return testudata(L, index, MT_GOINTERFACE);
-	}
+	return testgostruct(L, n) != NULL;
 }
 
 size_t clua_getgostate(lua_State* L)
@@ -77,7 +85,7 @@ size_t clua_getgostate(lua_State* L)
 int callback_function(lua_State* L)
 {
 	int r;
-	unsigned int *fid = clua_checkgosomething(L, 1, MT_GOFUNCTION);
+	unsigned int *fid = testgofunction(L, 1);
 	size_t gostateindex = clua_getgostate(L);
 	//remove the go function from the stack (to present same behavior as lua_CFunctions)
 	lua_remove(L,1);
@@ -88,7 +96,7 @@ int callback_function(lua_State* L)
 int gchook_wrapper(lua_State* L)
 {
 	//printf("Garbage collection wrapper\n");
-	unsigned int* fid = clua_checkgosomething(L, -1, NULL);
+	unsigned int* fid = testgosomething(L, -1);
 	size_t gostateindex = clua_getgostate(L);
 	if (fid != NULL)
 		return golua_gchook(gostateindex,*fid);
@@ -97,13 +105,13 @@ int gchook_wrapper(lua_State* L)
 
 unsigned int clua_togofunction(lua_State* L, int index)
 {
-	unsigned int *r = clua_checkgosomething(L, index, MT_GOFUNCTION);
+	unsigned int *r = testgofunction(L, index);
 	return (r != NULL) ? *r : -1;
 }
 
 unsigned int clua_togostruct(lua_State *L, int index)
 {
-	unsigned int *r = clua_checkgosomething(L, index, MT_GOINTERFACE);
+	unsigned int *r = testgostruct(L, index);
 	return (r != NULL) ? *r : -1;
 }
 
@@ -204,7 +212,7 @@ int load_chunk(lua_State *L, char *b, int size, const char* chunk_name) {
 /* called when lua code attempts to access a field of a published go object */
 int interface_index_callback(lua_State *L)
 {
-	unsigned int *iid = clua_checkgosomething(L, 1, MT_GOINTERFACE);
+	unsigned int *iid = testgostruct(L, 1);
 	if (iid == NULL)
 	{
 		lua_pushnil(L);
@@ -227,6 +235,31 @@ int interface_index_callback(lua_State *L)
 		lua_error(L);
 		return 0;
 	}
+	else if (r == 0)  // no field
+	{
+		// If a custom metatable was set for this object with clua_gostructmetatable(),
+		// the original __index value should be available as upvalue[1].
+		switch (lua_type(L, lua_upvalueindex(1))) {
+		case LUA_TNIL:  /* no user metatable with __index was set */
+			luaL_error(L, "No field: %s", field_name);
+			return 0;
+		case LUA_TFUNCTION:
+		FUNCTION:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __index onto the stack
+			lua_insert(L, 1);  // move the function value to the beginning of the stack
+			lua_call(L, 2, 1);  // Call __index(obj, field_name)
+			return 1;
+		case LUA_TUSERDATA:
+			if (clua_isgofunction(L, lua_upvalueindex(1))) {
+				goto FUNCTION;
+			}
+			/* fallthrough */
+		default:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __index onto the stack
+			lua_getfield(L, -1, field_name);  // __index[field_name]
+			return 1;
+		}
+	}
 	else
 	{
 		return r;
@@ -236,7 +269,7 @@ int interface_index_callback(lua_State *L)
 /* called when lua code attempts to set a field of a published go object */
 int interface_newindex_callback(lua_State *L)
 {
-	unsigned int *iid = clua_checkgosomething(L, 1, MT_GOINTERFACE);
+	unsigned int *iid = testgostruct(L, 1);
 	if (iid == NULL)
 	{
 		lua_pushnil(L);
@@ -258,6 +291,33 @@ int interface_newindex_callback(lua_State *L)
 	{
 		lua_error(L);
 		return 0;
+	}
+	else if (r == 0)  // no field
+	{
+		// If a custom metatable was set for this object with clua_gostructmetatable(),
+		// the original __newindex value should be available as upvalue[1].
+		switch (lua_type(L, lua_upvalueindex(1))) {
+		case LUA_TNIL:  /* no user metatable with __newindex was set */
+			luaL_error(L, "Wrong assignment to field %s", field_name);
+			return 0;
+		case LUA_TFUNCTION:
+		FUNCTION:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __newindex function onto the stack
+			lua_insert(L, 1);  // move the function value to the beginning of the stack
+			lua_call(L, 3, 1);  // Call __newindex(obj, field_name, value)
+			return 1;
+		case LUA_TUSERDATA:
+			if (clua_isgofunction(L, lua_upvalueindex(1))) {
+				goto FUNCTION;
+			}
+			/* fallthrough */
+		default:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __newindex onto the stack
+			lua_pushvalue(L, 3);  // push the value
+			lua_setfield(L, -2, field_name);  // __newindex[field_name] = value, pops the value
+			lua_pop(L, 1); // pop __newindex
+			return 1;
+		}
 	}
 	else
 	{
@@ -448,4 +508,37 @@ void clua_setexecutionlimit(lua_State* L, int n)
 	lua_sethook(L, &clua_hook_function, LUA_MASKCOUNT, n);
 }
 
+// Modifies the table at the top of the stack to use it as a metatable for GoStruct object
+void clua_gostructmetatable(lua_State* L)
+{
+	// gointerface_metatable[__gc] = &gchook_wrapper
+	lua_pushliteral(L, "__gc");
+	lua_pushcfunction(L, &gchook_wrapper);
+	lua_settable(L, -3);
 
+	// gointerface_metatable[__index] = &interface_index_callback
+	lua_pushliteral(L, "__index");
+	// if replacing an __index field, store the original one as an upvalue
+	lua_getfield(L, -2, "__index");
+	if (!lua_isnil(L, -1)) {
+		// store the original __index as an upvalue
+		lua_pushcclosure(L, &interface_index_callback, 1);
+	} else {
+		lua_pop(L, 1); // pop nil
+		lua_pushcfunction(L, &interface_index_callback);
+	}
+	lua_settable(L, -3);
+
+	// gointerface_metatable[__newindex] = &interface_newindex_callback
+	lua_pushliteral(L, "__newindex");
+	// if replacing a __newindex field, store the original one as an upvalue
+	lua_getfield(L, -2, "__newindex");
+	if (!lua_isnil(L, -1)) {
+		// store the original __newindex as an upvalue
+		lua_pushcclosure(L, &interface_newindex_callback, 1);
+	} else {
+		lua_pop(L, 1); // pop nil
+		lua_pushcfunction(L, &interface_newindex_callback);
+	}
+	lua_settable(L, -3);
+}

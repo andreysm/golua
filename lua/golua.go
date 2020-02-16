@@ -85,6 +85,10 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 
 	fval := ifacevalue.FieldByName(field_name)
 
+	if !fval.IsValid() {  // no field with this name
+		return 0
+	}
+
 	if fval.Kind() == reflect.Ptr {
 		fval = fval.Elem()
 	}
@@ -177,6 +181,10 @@ func golua_interface_index_callback(gostateindex uintptr, iid uint, field_name *
 	ifacevalue := reflect.ValueOf(iface).Elem()
 
 	fval := ifacevalue.FieldByName(C.GoString(field_name))
+
+	if !fval.IsValid() { // no field with this name
+		return 0
+	}
 
 	if fval.Kind() == reflect.Ptr {
 		fval = fval.Elem()

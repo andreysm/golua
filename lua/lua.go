@@ -495,6 +495,18 @@ func (L *State) SetMetaTable(index int) {
 	C.lua_setmetatable(L.s, C.int(index))
 }
 
+// Pops a table from the stack and sets it as the new metatable for the GoStruct at the given index.
+// Note that you should never apply SetMetaTable() to a GoStruct, because GoStruct internally has a special metatable to operate.
+// Use SetMetaTableForGoStruct to set a metatable for a GoStruct object.
+// This function modifies the given metatable by wrapping __index and __newindex values internally.
+func (L *State) SetMetaTableForGoStruct(index int) {
+	if (L.IsGoStruct(index)) {
+		C.clua_gostructmetatable(L.s)
+	}
+	
+	L.SetMetaTable(index)
+}
+
 // lua_settable
 func (L *State) SetTable(index int) {
 	C.lua_settable(L.s, C.int(index))
