@@ -11,6 +11,10 @@ type TestStruct struct {
 	FloatField  float64
 }
 
+func (ts *TestStruct) TestMethod(s string) string {
+	return ts.StringField + s
+}
+
 func TestGoStruct(t *testing.T) {
 	L := NewState()
 	L.OpenLibs()
@@ -38,6 +42,62 @@ func TestGoStruct(t *testing.T) {
 	L.PushString("This is not a struct")
 	if L.ToGoStruct(-1) != nil {
 		t.Fatal("Non-GoStruct value attempted to convert into GoStruct should result in nil")
+	}
+
+	L.Pop(1)
+}
+
+func TestGoStructMetatable(t *testing.T) {
+	L := NewState()
+	L.OpenLibs()
+	defer L.Close()
+
+	ts := &TestStruct{10, "test", 2.3}
+
+	L.PushGoStruct(ts)
+	
+	TestMethodWrapper := func(L *State) int {
+		obj := L.ToGoStruct(1)
+		s := L.ToString(2)
+		result := obj.(*TestStruct).TestMethod(s)
+		L.PushString(result)
+		return 1
+	}
+
+	L.NewTable()  // metatable
+	L.PushGoFunction(TestMethodWrapper)
+	L.SetField(-2, "TestMethod")
+
+	L.PushValue(-1)  // Copy table onto the stack
+	L.SetField(-2, "__index")  // Set table.__index = table (common technique for class implementation)
+
+	NewIndex := func(L *State) int {
+		obj := L.ToGoStruct(1)
+		key := L.ToString(2)
+		if L.IsNumber(3) {
+			obj.(*TestStruct).StringField = key  // just for test
+			obj.(*TestStruct).FloatField = L.ToNumber(3)
+		}
+		return 0
+	}
+
+	L.PushGoFunction(NewIndex)
+	L.SetField(-2, "__newindex")  // Set table.__newindex = NewIndex
+
+	L.SetMetaTableForGoStruct(-2)  // set as metatable for ts
+	
+	L.SetGlobal("t")
+
+	// Check method call
+	err := L.DoString(`res = t:TestMethod("ok"); assert(res == "testok", res)`)
+	if err != nil {
+		t.Fatalf("DoString did return an error: %v\n", err.Error())
+	}
+
+	// Check __newindex
+	err = L.DoString(`t["foo"] = 4.2; assert(t.StringField == "foo", t.StringField); assert(t.FloatField == 4.2, tostring(t.FloatField))`)
+	if err != nil {
+		t.Fatalf("DoString did return an error: %v\n", err.Error())
 	}
 
 	L.Pop(1)

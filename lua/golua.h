@@ -33,4 +33,5 @@ void clua_setexecutionlimit(lua_State* L, int n);
 
 int clua_isgofunction(lua_State *L, int n);
 int clua_isgostruct(lua_State *L, int n);
+void clua_gostructmetatable(lua_State *L);
 

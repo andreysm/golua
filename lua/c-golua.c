@@ -13,6 +13,8 @@
 static const char GoStateRegistryKey = 'k'; //golua registry key
 static const char PanicFIDRegistryKey = 'k';
 
+int gchook_wrapper(lua_State* L);
+
 typedef struct _chunk {
 	int size; // chunk size
 	char *buffer; // chunk data
@@ -28,10 +30,20 @@ void *testudata(lua_State *L, int ud, const char *tname)
 		if (lua_getmetatable(L, ud))
 		{  /* does it have a metatable? */
 			luaL_getmetatable(L, tname);  /* get correct metatable */
-			if (!lua_rawequal(L, -1, -2))  /* not the same? */
-				p = NULL;  /* value is a userdata with wrong metatable */
-			lua_pop(L, 2);  /* remove both metatables */
-			return p;
+			if (lua_rawequal(L, -1, -2))  /* the same */
+			{
+				lua_pop(L, 2);  /* remove both metatables */
+				return p;
+			}
+			else
+			{
+				/* let's also check the metatable.__gc field */
+				lua_getfield(L, -2, "__gc");
+				if (lua_tocfunction(L, -1) != gchook_wrapper)
+					p = NULL;  /* wrong metatable */
+				lua_pop(L, 3);  /* remove both metatables and __gc value */
+				return p;
+			}
 		}
 	}
 	return NULL;  /* value is not a userdata with a metatable */
@@ -227,6 +239,31 @@ int interface_index_callback(lua_State *L)
 		lua_error(L);
 		return 0;
 	}
+	else if (r == 0)  // no field
+	{
+		// If a custom metatable was set for this object with clua_gostructmetatable(),
+		// the original __index value should be available as upvalue[1].
+		switch (lua_type(L, lua_upvalueindex(1))) {
+		case LUA_TNIL:  /* no user metatable with __index was set */
+			luaL_error(L, "No field: %s", field_name);
+			return 0;
+		case LUA_TFUNCTION:
+		FUNCTION:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __index onto the stack
+			lua_insert(L, 1);  // move the function value to the beginning of the stack
+			lua_call(L, 2, 1);  // Call __index(obj, field_name)
+			return 1;
+		case LUA_TUSERDATA:
+			if (clua_isgofunction(L, lua_upvalueindex(1))) {
+				goto FUNCTION;
+			}
+			/* fallthrough */
+		default:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __index onto the stack
+			lua_getfield(L, -1, field_name);  // __index[field_name]
+			return 1;
+		}
+	}
 	else
 	{
 		return r;
@@ -258,6 +295,33 @@ int interface_newindex_callback(lua_State *L)
 	{
 		lua_error(L);
 		return 0;
+	}
+	else if (r == 0)  // no field
+	{
+		// If a custom metatable was set for this object with clua_gostructmetatable(),
+		// the original __newindex value should be available as upvalue[1].
+		switch (lua_type(L, lua_upvalueindex(1))) {
+		case LUA_TNIL:  /* no user metatable with __newindex was set */
+			luaL_error(L, "Wrong assignment to field %s", field_name);
+			return 0;
+		case LUA_TFUNCTION:
+		FUNCTION:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __newindex function onto the stack
+			lua_insert(L, 1);  // move the function value to the beginning of the stack
+			lua_call(L, 3, 1);  // Call __newindex(obj, field_name, value)
+			return 1;
+		case LUA_TUSERDATA:
+			if (clua_isgofunction(L, lua_upvalueindex(1))) {
+				goto FUNCTION;
+			}
+			/* fallthrough */
+		default:
+			lua_pushvalue(L, lua_upvalueindex(1));  // put __newindex onto the stack
+			lua_pushvalue(L, 3);  // push the value
+			lua_setfield(L, -2, field_name);  // __newindex[field_name] = value, pops the value
+			lua_pop(L, 1); // pop __newindex
+			return 1;
+		}
 	}
 	else
 	{
@@ -448,4 +512,37 @@ void clua_setexecutionlimit(lua_State* L, int n)
 	lua_sethook(L, &clua_hook_function, LUA_MASKCOUNT, n);
 }
 
+// Modifies the table at the top of the stack to use it as a metatable for GoStruct object
+void clua_gostructmetatable(lua_State* L)
+{
+	// gointerface_metatable[__gc] = &gchook_wrapper
+	lua_pushliteral(L, "__gc");
+	lua_pushcfunction(L, &gchook_wrapper);
+	lua_settable(L, -3);
 
+	// gointerface_metatable[__index] = &interface_index_callback
+	lua_pushliteral(L, "__index");
+	// if replacing an __index field, store the original one as an upvalue
+	lua_getfield(L, -2, "__index");
+	if (!lua_isnil(L, -1)) {
+		// store the original __index as an upvalue
+		lua_pushcclosure(L, &interface_index_callback, 1);
+	} else {
+		lua_pop(L, 1); // pop nil
+		lua_pushcfunction(L, &interface_index_callback);
+	}
+	lua_settable(L, -3);
+
+	// gointerface_metatable[__newindex] = &interface_newindex_callback
+	lua_pushliteral(L, "__newindex");
+	// if replacing a __newindex field, store the original one as an upvalue
+	lua_getfield(L, -2, "__newindex");
+	if (!lua_isnil(L, -1)) {
+		// store the original __newindex as an upvalue
+		lua_pushcclosure(L, &interface_newindex_callback, 1);
+	} else {
+		lua_pop(L, 1); // pop nil
+		lua_pushcfunction(L, &interface_newindex_callback);
+	}
+	lua_settable(L, -3);
+}
