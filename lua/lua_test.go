@@ -31,6 +31,9 @@ func TestGoStruct(t *testing.T) {
 	if !L.IsGoStruct(-1) {
 		t.Fatal("Not go struct")
 	}
+	if L.IsGoFunction(-1) {
+		t.Fatal("Should not be go function")
+	}
 
 	tsr := L.ToGoStruct(-1).(*TestStruct)
 	if tsr != ts {
@@ -186,6 +189,12 @@ func TestCall(t *testing.T) {
 
 	L.PushString("Dummy")
 	L.GetGlobal("test")
+	if !L.IsGoFunction(-1) {
+		t.Fatal("not go function")
+	}
+	if L.IsGoStruct(-1) {
+		t.Fatal("Should not be go struct")
+	}
 	L.PushString("Argument1")
 	L.PushString("Argument2")
 	L.PushString("Argument3")

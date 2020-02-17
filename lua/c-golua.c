@@ -13,6 +13,9 @@
 static const char GoStateRegistryKey = 'k'; //golua registry key
 static const char PanicFIDRegistryKey = 'k';
 
+int callback_function(lua_State* L);
+int interface_index_callback(lua_State *L);
+int interface_newindex_callback(lua_State *L);
 int gchook_wrapper(lua_State* L);
 
 typedef struct _chunk {
@@ -21,56 +24,49 @@ typedef struct _chunk {
 	char* toread; // chunk to read
 } chunk;
 
-/* taken from lua5.2 source */
-void *testudata(lua_State *L, int ud, const char *tname)
+unsigned int *testudata(lua_State *L, int n, const char * field, void * expected)
 {
-	void *p = lua_touserdata(L, ud);
+	unsigned int *p = lua_touserdata(L, n);
 	if (p != NULL)
 	{  /* value is a userdata? */
-		if (lua_getmetatable(L, ud))
+		if (lua_getmetatable(L, n))
 		{  /* does it have a metatable? */
-			luaL_getmetatable(L, tname);  /* get correct metatable */
-			if (lua_rawequal(L, -1, -2))  /* the same */
-			{
-				lua_pop(L, 2);  /* remove both metatables */
-				return p;
-			}
-			else
-			{
-				/* let's also check the metatable.__gc field */
-				lua_getfield(L, -2, "__gc");
-				if (lua_tocfunction(L, -1) != gchook_wrapper)
-					p = NULL;  /* wrong metatable */
-				lua_pop(L, 3);  /* remove both metatables and __gc value */
-				return p;
-			}
+			lua_getfield(L, -1, field);
+			if (lua_tocfunction(L, -1) != expected)
+				p = NULL;  /* wrong metatable */
+			lua_pop(L, 2);  /* remove metatable and field values */
+			return p;
 		}
 	}
 	return NULL;  /* value is not a userdata with a metatable */
 }
 
+unsigned int *testgofunction(lua_State *L, int n)
+{
+	/* GoFunction should have __call callback */
+	return testudata(L, n, "__call", callback_function);
+}
+
+unsigned int *testgostruct(lua_State *L, int n)
+{
+	/* GoInterface should have interface_index_callback */
+	return testudata(L, n, "__index", interface_index_callback);
+}
+
+unsigned int *testgosomething(lua_State *L, int n)
+{
+	/* GoFunction and GoInterface should have gchook_wrapper callback */
+	return testudata(L, n, "__gc", gchook_wrapper);
+}
+
 int clua_isgofunction(lua_State *L, int n)
 {
-	return testudata(L, n, MT_GOFUNCTION) != NULL;
+	return testgofunction(L, n) != NULL;
 }
 
 int clua_isgostruct(lua_State *L, int n)
 {
-	return testudata(L, n, MT_GOINTERFACE) != NULL;
-}
-
-unsigned int* clua_checkgosomething(lua_State* L, int index, const char *desired_metatable)
-{
-	if (desired_metatable != NULL)
-	{
-		return testudata(L, index, desired_metatable);
-	}
-	else
-	{
-		unsigned int *sid = testudata(L, index, MT_GOFUNCTION);
-		if (sid != NULL) return sid;
-		return testudata(L, index, MT_GOINTERFACE);
-	}
+	return testgostruct(L, n) != NULL;
 }
 
 size_t clua_getgostate(lua_State* L)
@@ -89,7 +85,7 @@ size_t clua_getgostate(lua_State* L)
 int callback_function(lua_State* L)
 {
 	int r;
-	unsigned int *fid = clua_checkgosomething(L, 1, MT_GOFUNCTION);
+	unsigned int *fid = testgofunction(L, 1);
 	size_t gostateindex = clua_getgostate(L);
 	//remove the go function from the stack (to present same behavior as lua_CFunctions)
 	lua_remove(L,1);
@@ -100,7 +96,7 @@ int callback_function(lua_State* L)
 int gchook_wrapper(lua_State* L)
 {
 	//printf("Garbage collection wrapper\n");
-	unsigned int* fid = clua_checkgosomething(L, -1, NULL);
+	unsigned int* fid = testgosomething(L, -1);
 	size_t gostateindex = clua_getgostate(L);
 	if (fid != NULL)
 		return golua_gchook(gostateindex,*fid);
@@ -109,13 +105,13 @@ int gchook_wrapper(lua_State* L)
 
 unsigned int clua_togofunction(lua_State* L, int index)
 {
-	unsigned int *r = clua_checkgosomething(L, index, MT_GOFUNCTION);
+	unsigned int *r = testgofunction(L, index);
 	return (r != NULL) ? *r : -1;
 }
 
 unsigned int clua_togostruct(lua_State *L, int index)
 {
-	unsigned int *r = clua_checkgosomething(L, index, MT_GOINTERFACE);
+	unsigned int *r = testgostruct(L, index);
 	return (r != NULL) ? *r : -1;
 }
 
@@ -216,7 +212,7 @@ int load_chunk(lua_State *L, char *b, int size, const char* chunk_name) {
 /* called when lua code attempts to access a field of a published go object */
 int interface_index_callback(lua_State *L)
 {
-	unsigned int *iid = clua_checkgosomething(L, 1, MT_GOINTERFACE);
+	unsigned int *iid = testgostruct(L, 1);
 	if (iid == NULL)
 	{
 		lua_pushnil(L);
@@ -273,7 +269,7 @@ int interface_index_callback(lua_State *L)
 /* called when lua code attempts to set a field of a published go object */
 int interface_newindex_callback(lua_State *L)
 {
-	unsigned int *iid = clua_checkgosomething(L, 1, MT_GOINTERFACE);
+	unsigned int *iid = testgostruct(L, 1);
 	if (iid == NULL)
 	{
 		lua_pushnil(L);
